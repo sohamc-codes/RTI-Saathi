@@ -356,7 +356,9 @@ export default function ManualRtiPage() {
   const isStoredCompletedSubmission = Boolean(storedDraft) && parsedDraft.currentStep === "success" && parsedDraft.submission.status === "submitted";
   const draft = useMemo(() => (isStoredCompletedSubmission ? createManualDraft() : parsedDraft), [isStoredCompletedSubmission, parsedDraft]);
   const [completedApplication, setCompletedApplication] = useState<RTIApplicationDraft | null>(null);
-  const [resumeDismissed, setResumeDismissed] = useState(false);
+  // Track whether the user has actively engaged with the form in this session.
+  // Once true, never show the resume prompt again even though autosave continues.
+  const [sessionActive, setSessionActive] = useState(false);
   const [authorities, setAuthorities] = useState<AuthorityCandidate[]>([]);
   const [directoryDepartments, setDirectoryDepartments] = useState<Array<{ id: string; name: string; category: string; authorityCount: number }>>([]);
   const [authorityNotice, setAuthorityNotice] = useState("");
@@ -373,7 +375,11 @@ export default function ManualRtiPage() {
   const t = translations[language];
   const steps = useMemo(() => getSteps(t), [t]);
 
-  const hasSavedDraft = Boolean(storedDraft) && !isStoredCompletedSubmission && !resumeDismissed;
+  // Show resume prompt only on initial page load when:
+  // 1. A stored draft exists
+  // 2. It's not a completed submission
+  // 3. The session hasn't been activated yet (user hasn't engaged with the wizard)
+  const hasSavedDraft = Boolean(storedDraft) && !isStoredCompletedSubmission && !sessionActive;
 
   // Discard stale completed submissions so a finished application can never be offered as a resumable draft.
   useEffect(() => {
@@ -391,9 +397,19 @@ export default function ManualRtiPage() {
   const mockCities = useMemo(() => Array.from(new Set(MOCK_POC_LOCATIONS.filter((location) => location.state === draft.jurisdiction.state && location.district === draft.jurisdiction.district).map((location) => location.city))), [draft.jurisdiction.state, draft.jurisdiction.district]);
   const mockPincodes = useMemo(() => Array.from(new Set(MOCK_POC_LOCATIONS.filter((location) => location.state === draft.jurisdiction.state && location.district === draft.jurisdiction.district && location.city === draft.jurisdiction.city).map((location) => location.pincode))), [draft.jurisdiction.state, draft.jurisdiction.district, draft.jurisdiction.city]);
   const visibleDepartments = useMemo(() => departments.filter((item) => item[1].toLowerCase().includes(departmentSearch.toLowerCase())), [departmentSearch]);
-  const patchDraft = (next: RTIApplicationDraft) => { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("rti-manual-draft-change")); setErrors([]); };
-  const startNew = () => { window.localStorage.removeItem(STORAGE_KEY); window.dispatchEvent(new Event("rti-manual-draft-change")); setResumeDismissed(true); };
-  const continueDraft = () => setResumeDismissed(true);
+  const patchDraft = (next: RTIApplicationDraft) => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.dispatchEvent(new Event("rti-manual-draft-change"));
+    setErrors([]);
+    // Once the user modifies the draft, mark the session as active so resume prompt never shows again
+    if (!sessionActive) setSessionActive(true);
+  };
+  const startNew = () => {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.dispatchEvent(new Event("rti-manual-draft-change"));
+    setSessionActive(true);
+  };
+  const continueDraft = () => setSessionActive(true);
   const stepError = (step: ManualStep): string[] => {
     if (step === "jurisdiction") return draft.jurisdiction.state && draft.jurisdiction.district && draft.jurisdiction.city && draft.jurisdiction.pincode ? [] : ["Select a state, district, city or village, and pincode for this issue."];
     if (step === "department") return draft.department ? [] : ["Choose the government area that best matches your issue."];
@@ -431,7 +447,14 @@ export default function ManualRtiPage() {
     patchDraft({ ...draft, currentStep: next as ManualStep });
   };
   const goBack = () => {
-    const previous = draft.currentStep === "department" ? "jurisdiction" : draft.currentStep === "authority" ? "department" : draft.currentStep === "applicant" ? "authority" : draft.currentStep === "request" ? "applicant" : draft.currentStep === "preferences" ? "request" : draft.currentStep === "review" ? "preferences" : "payment";
+    const previous = draft.currentStep === "department" ? "jurisdiction"
+      : draft.currentStep === "authority" ? "department"
+      : draft.currentStep === "applicant" ? "authority"
+      : draft.currentStep === "request" ? "applicant"
+      : draft.currentStep === "preferences" ? "request"
+      : draft.currentStep === "review" ? "preferences"
+      : draft.currentStep === "payment" ? "review"
+      : "jurisdiction";
     if (draft.currentStep !== "jurisdiction") patchDraft({ ...draft, currentStep: previous as ManualStep });
   };
   const fetchAuthorities = async () => {
@@ -651,7 +674,7 @@ function WizardContent({ draft, patchDraft, visibleDepartments, mockStates, mock
   if (draft.currentStep === "request") return <Section eyebrow={t.step5Eyebrow} title={t.step5Title} description={t.step5Desc}><label className="field-label">{t.subject}<textarea className="field mt-2 min-h-20 resize-y" value={draft.request.subject} onChange={(event) => patchDraft({ ...draft, request: { ...draft.request, subject: event.target.value } })} placeholder={t.subjectPlaceholder} /><span className={`mt-1 block text-right text-xs ${subjectWords > 150 ? "text-[#a35233]" : "text-[#6c7770]"}`}>{subjectWords}/150 {t.words}</span></label><label className="mt-4 block field-label">{t.detailedInformation}<textarea className="field mt-2 min-h-36 resize-y" value={draft.request.informationRequested} onChange={(event) => patchDraft({ ...draft, request: { ...draft.request, informationRequested: event.target.value } })} placeholder={t.detailedPlaceholder} /></label><div className="mt-4 flex flex-wrap gap-2">{requestChoices.map((choice) => <button key={choice} className={`border px-2.5 py-1.5 text-xs rounded ${draft.request.structuredItems.includes(choice) ? "border-[#ec6a2c] bg-[#fff4ee] font-medium" : "border-[#cbd8ce] bg-white/60"}`} onClick={() => { const items = draft.request.structuredItems.includes(choice) ? draft.request.structuredItems.filter((item) => item !== choice) : [...draft.request.structuredItems, choice]; patchDraft({ ...draft, request: { ...draft.request, structuredItems: items } }); }}>{choice}</button>)}</div><button className="secondary-button mt-4" onClick={() => void helpWrite()} disabled={assistBusy || !draft.request.informationRequested.trim()}>{assistBusy ? t.writing : t.helpMeWrite}</button></Section>;
   if (draft.currentStep === "preferences") return <Section eyebrow="Step 6" title="Final details" description="Choose time period and delivery preferences."><label className="field-label">Time period<select className="field mt-2" value={draft.informationPeriod.type} onChange={(event) => patchDraft({ ...draft, informationPeriod: { ...draft.informationPeriod, type: event.target.value } })}><option value="">Choose period</option><option>Specific year</option><option>Date range</option><option>Financial year</option><option>From a date</option><option>Until a date</option><option>No specific period</option></select></label>{draft.informationPeriod.type && draft.informationPeriod.type !== "No specific period" ? <div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="field-label">From<input className="field mt-2" value={draft.informationPeriod.from} onChange={(event) => patchDraft({ ...draft, informationPeriod: { ...draft.informationPeriod, from: event.target.value } })} placeholder="E.g., 2024" /></label><label className="field-label">To<input className="field mt-2" value={draft.informationPeriod.to} onChange={(event) => patchDraft({ ...draft, informationPeriod: { ...draft.informationPeriod, to: event.target.value } })} placeholder="Optional" /></label></div> : null}<label className="mt-4 block field-label">Delivery method<select className="field mt-2" value={draft.delivery.mode} onChange={(event) => patchDraft({ ...draft, delivery: { mode: event.target.value } })}><option value="">Choose method</option><option>Email</option><option>Registered post</option><option>In person</option><option>Online portal</option><option>Personal pen drive</option></select></label><fieldset className="mt-4"><legend className="field-label">Below Poverty Line (BPL) applicant?</legend><div className="mt-2 flex gap-4 text-sm"><label><input type="radio" checked={!draft.bpl.isBpl} onChange={() => patchDraft({ ...draft, bpl: { ...draft.bpl, isBpl: false, proofFileName: "" }, payment: { ...draft.payment, required: true, amount: 10 } })} /> No</label><label><input type="radio" checked={draft.bpl.isBpl} onChange={() => patchDraft({ ...draft, bpl: { ...draft.bpl, isBpl: true }, payment: { ...draft.payment, required: false, amount: 0, status: "not_required" } })} /> Yes</label></div></fieldset>{draft.bpl.isBpl ? <label className="mt-3 block field-label">BPL proof<input className="field mt-2" type="file" accept="application/pdf,image/*" onChange={(event) => patchDraft({ ...draft, bpl: { ...draft.bpl, proofFileName: event.target.files?.[0]?.name ?? "" } })} /><span className="mt-1 block text-xs text-[#6c7770]">Demo only</span></label> : null}<label className="mt-4 block field-label">Supporting document (optional)<input className="field mt-2" type="file" accept="application/pdf,image/*,.doc,.docx" onChange={(event) => { const file = event.target.files?.[0]; if (file) patchDraft({ ...draft, attachments: [{ id: `attachment-${Date.now()}`, name: file.name, size: file.size, type: file.type }] }); }} /></label></Section>;
   if (draft.currentStep === "review") return <Section eyebrow="Step 7" title="Review your application" description="Verify all details before payment."><div className="space-y-3">{[["Location", `${draft.jurisdiction.district}, ${draft.jurisdiction.state}`], ["Department", draft.department?.name ?? "Not selected"], ["Office", draft.publicAuthority?.publicAuthority ?? "Not selected"], ["Applicant", `${draft.applicant.fullName} · ${draft.applicant.email}`], ["Subject", draft.request.subject], ["Information", draft.request.informationRequested], ["Period", `${draft.informationPeriod.type}${draft.informationPeriod.from ? `: ${draft.informationPeriod.from}${draft.informationPeriod.to ? ` → ${draft.informationPeriod.to}` : ""}` : ""}`], ["Delivery", draft.delivery.mode], ["BPL", draft.bpl.isBpl ? `Yes · ${draft.bpl.proofFileName}` : "No"], ["Attachments", draft.attachments.length ? draft.attachments.map((item) => item.name).join(", ") : "None"]].map(([label, value]) => <div key={label} className="border-b border-[#dbe3dc] pb-2.5"><p className="text-xs font-medium text-[#6c7770]">{label}</p><p className="mt-1 whitespace-pre-wrap text-sm text-[#13201c]">{value}</p></div>)}</div></Section>;
-  if (draft.currentStep === "payment") return <Section eyebrow="Demo payment" title="Complete payment" description="Demo only — no real payment required."><div className="border-y border-[#dbe3dc] py-4"><div className="flex justify-between"><span className="text-sm">RTI application fee</span><strong className="text-lg">₹{draft.payment.amount}</strong></div><p className="mt-2 text-xs text-[#6c7770]">{draft.bpl.isBpl ? "No fee for BPL applicants in this demo." : "Demo fee based on Maharashtra rules."}</p></div><div className="mt-4 grid gap-2 sm:grid-cols-3"><button className="secondary-button">UPI</button><button className="secondary-button">Card</button><button className="secondary-button">Net banking</button></div></Section>;
+  if (draft.currentStep === "payment") return <Section eyebrow="Demo payment" title="Complete payment" description="Demo only — no real payment required."><div className="border-y border-[#dbe3dc] py-4"><div className="flex justify-between"><span className="text-sm">RTI application fee</span><strong className="text-lg">₹{draft.payment.amount}</strong></div><p className="mt-2 text-xs text-[#6c7770]">{draft.bpl.isBpl ? "No fee for BPL applicants in this demo." : `Demo fee (currently using ₹10 standard for all states in this prototype).`}</p></div><div className="mt-4 grid gap-2 sm:grid-cols-3"><button className="secondary-button">UPI</button><button className="secondary-button">Card</button><button className="secondary-button">Net banking</button></div></Section>;
   return (
     <div className="max-w-[600px] mx-auto">
       <div className="mb-6 text-center">
