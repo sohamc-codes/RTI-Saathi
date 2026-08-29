@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { AuthorityCandidate } from "@/lib/authority/types";
 import { isValidEmailAddress, isValidMobileNumber } from "@/lib/applications/validation";
 import { createManualDraft, type ManualStep, type RTIApplicationDraft } from "@/lib/manual/types";
+import { saveSubmittedApplication, toSubmittedApplication } from "@/lib/manual/submitted";
 import { MOCK_POC_LOCATIONS } from "@/lib/mock/rti";
 
 type Language = "English" | "हिन्दी" | "मराठी";
@@ -350,7 +351,11 @@ function update<T extends keyof RTIApplicationDraft>(draft: RTIApplicationDraft,
 
 export default function ManualRtiPage() {
   const storedDraft = useSyncExternalStore(subscribeToDraft, readDraftSnapshot, () => "");
-  const draft = useMemo(() => loadDraft(storedDraft), [storedDraft]);
+  const parsedDraft = useMemo(() => loadDraft(storedDraft), [storedDraft]);
+  // A stored draft that already reached a submitted success state is stale completed data, never a resumable draft.
+  const isStoredCompletedSubmission = Boolean(storedDraft) && parsedDraft.currentStep === "success" && parsedDraft.submission.status === "submitted";
+  const draft = useMemo(() => (isStoredCompletedSubmission ? createManualDraft() : parsedDraft), [isStoredCompletedSubmission, parsedDraft]);
+  const [completedApplication, setCompletedApplication] = useState<RTIApplicationDraft | null>(null);
   const [resumeDismissed, setResumeDismissed] = useState(false);
   const [authorities, setAuthorities] = useState<AuthorityCandidate[]>([]);
   const [directoryDepartments, setDirectoryDepartments] = useState<Array<{ id: string; name: string; category: string; authorityCount: number }>>([]);
@@ -368,9 +373,19 @@ export default function ManualRtiPage() {
   const t = translations[language];
   const steps = useMemo(() => getSteps(t), [t]);
 
-  const hasSavedDraft = Boolean(storedDraft) && !resumeDismissed;
+  const hasSavedDraft = Boolean(storedDraft) && !isStoredCompletedSubmission && !resumeDismissed;
 
-  const currentIndex = Math.max(0, steps.findIndex((step) => step.id === draft.currentStep));
+  // Discard stale completed submissions so a finished application can never be offered as a resumable draft.
+  useEffect(() => {
+    if (!isStoredCompletedSubmission) return;
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.dispatchEvent(new Event("rti-manual-draft-change"));
+  }, [isStoredCompletedSubmission]);
+
+  // The success screen for the submission made in this session comes from component state, never from storage.
+  const displayDraft = completedApplication ?? draft;
+
+  const currentIndex = Math.max(0, steps.findIndex((step) => step.id === displayDraft.currentStep));
   const mockStates = useMemo(() => Array.from(new Set(MOCK_POC_LOCATIONS.map((location) => location.state))), []);
   const mockDistricts = useMemo(() => Array.from(new Set(MOCK_POC_LOCATIONS.filter((location) => location.state === draft.jurisdiction.state).map((location) => location.district))), [draft.jurisdiction.state]);
   const mockCities = useMemo(() => Array.from(new Set(MOCK_POC_LOCATIONS.filter((location) => location.state === draft.jurisdiction.state && location.district === draft.jurisdiction.district).map((location) => location.city))), [draft.jurisdiction.state, draft.jurisdiction.district]);
@@ -452,12 +467,21 @@ export default function ManualRtiPage() {
       }
     } finally { setAssistBusy(false); }
   };
-  const completePayment = () => patchDraft({ ...draft, payment: { ...draft.payment, status: draft.payment.required ? "paid" : "not_required", transactionId: draft.payment.required ? `DEMO-UPI-${Date.now()}` : "" }, currentStep: "success", submission: { status: "submitted", registrationNumber: `MH-RTI-2026-${Math.floor(10000 + Math.random() * 90000)}`, submittedAt: new Date().toISOString() } });
+  const completePayment = () => {
+    const completed: RTIApplicationDraft = { ...draft, payment: { ...draft.payment, status: draft.payment.required ? "paid" : "not_required", transactionId: draft.payment.required ? `DEMO-UPI-${Date.now()}` : "" }, currentStep: "success", submission: { status: "submitted", registrationNumber: `MH-RTI-2026-${Math.floor(10000 + Math.random() * 90000)}`, submittedAt: new Date().toISOString() } };
+    // The submitted record goes to the submitted-application store; the draft key stays for resumable drafts only.
+    saveSubmittedApplication(toSubmittedApplication(completed));
+    // The completed submission lives in component state only, so it can never come back as a resumable draft.
+    setCompletedApplication(completed);
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.dispatchEvent(new Event("rti-manual-draft-change"));
+    setErrors([]);
+  };
   const subjectWords = draft.request.subject.trim() ? draft.request.subject.trim().split(/\s+/).filter(Boolean).length : 0;
   const departmentOptions = directoryDepartments.length ? directoryDepartments : departments.map(([id, name]) => ({ id, name, category: authorityCategories[id] ?? name, authorityCount: 0 }));
   const visibleDepartmentOptions = departmentOptions.filter((item) => item.name.toLowerCase().includes(departmentSearch.toLowerCase()));
 
-  if (hasSavedDraft && draft.currentStep !== "success") return (
+  if (hasSavedDraft && displayDraft.currentStep !== "success") return (
     <main className="max-w-[600px] mx-auto px-4 py-12 sm:px-6 sm:py-20">
       <span className="font-semibold uppercase text-neutral-500 text-[10px] leading-3 tracking-[1.1px] sm:text-xs sm:leading-4 sm:tracking-[1.28px]">{t.manualRTIFiling}</span>
       <h1 className="mt-3 font-bold text-neutral-950 text-[24px] leading-[30px] sm:mt-4 sm:text-[32px] sm:leading-[38px]">{t.continueTitle}</h1>
@@ -513,14 +537,14 @@ export default function ManualRtiPage() {
               </button>
             ))}
           </div>
-          {draft.currentStep !== "success" && draft.currentStep !== "payment" ? (
+          {displayDraft.currentStep !== "success" && displayDraft.currentStep !== "payment" ? (
             <span className="text-[10px] text-neutral-500 bg-neutral-100 px-2.5 py-1 rounded-lg border-neutral-200 border-1 border-solid sm:text-xs sm:px-3 sm:py-1.5">{t.stepOf} {currentIndex + 1} of 7</span>
           ) : null}
         </div>
       </header>
 
       {/* Compact Progress - Hide on success/payment */}
-      {draft.currentStep !== "success" && draft.currentStep !== "payment" ? (
+      {displayDraft.currentStep !== "success" && displayDraft.currentStep !== "payment" ? (
         <div className="mb-6 flex items-center gap-1.5 overflow-x-auto pb-2 sm:mb-8 sm:gap-2">
           {steps.map((step, index) => (
             <div key={step.id} className="flex items-center gap-1.5 flex-1 min-w-0 sm:gap-2">
@@ -559,7 +583,7 @@ export default function ManualRtiPage() {
       ) : null}
 
       <WizardContent
-        draft={draft} patchDraft={patchDraft} visibleDepartments={visibleDepartmentOptions}
+        draft={displayDraft} patchDraft={patchDraft} visibleDepartments={visibleDepartmentOptions}
         mockStates={mockStates} mockDistricts={mockDistricts} mockCities={mockCities} mockPincodes={mockPincodes}
         departmentSearch={departmentSearch} setDepartmentSearch={setDepartmentSearch}
         authorities={authorities} authorityNotice={authorityNotice} otp={otp} setOtp={setOtp}
@@ -571,7 +595,7 @@ export default function ManualRtiPage() {
 
       {/* Navigation */}
       <div className="mt-8 pt-6 border-neutral-200 border-t-1 border-solid flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
-        {draft.currentStep === "success"
+        {displayDraft.currentStep === "success"
           ? <Link
               className="font-semibold rounded-lg bg-neutral-900 text-neutral-50 text-[15px] px-6 h-11 flex items-center justify-center gap-2 border-0"
               href="/rti/track"
@@ -591,7 +615,7 @@ export default function ManualRtiPage() {
               </svg>
               {t.back}
             </button>}
-        {draft.currentStep !== "success" && draft.currentStep !== "payment"
+        {displayDraft.currentStep !== "success" && displayDraft.currentStep !== "payment"
           ? <button
               className="font-semibold rounded-lg bg-neutral-900 text-neutral-50 text-[15px] px-6 h-11 flex items-center justify-center gap-2 border-0 cursor-pointer w-full sm:w-auto"
               onClick={() => void goNext()}
@@ -601,7 +625,7 @@ export default function ManualRtiPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
             </button>
-          : draft.currentStep === "payment"
+          : displayDraft.currentStep === "payment"
             ? <button
                 className="font-semibold rounded-lg bg-neutral-900 text-neutral-50 text-[15px] px-6 h-11 flex items-center justify-center gap-2 border-0 cursor-pointer w-full sm:w-auto"
                 onClick={completePayment}

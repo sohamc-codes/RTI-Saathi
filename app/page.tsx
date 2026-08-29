@@ -1,5 +1,6 @@
 "use client";
 
+import { saveSubmittedApplication, toSubmittedApplication } from "@/lib/manual/submitted";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent } from "react";
 import Link from "next/link";
@@ -10,6 +11,9 @@ import type { StructuredIntent } from "@/lib/reasoning/types";
 import type { OfficialContextResult } from "@/lib/rag/types";
 import { isSpeechToTextResult } from "@/lib/speech/types";
 import { MAX_SPEECH_RECORDING_SECONDS, speechAudioMetadata } from "@/lib/speech/audio";
+
+// Extended recording time for long RTI applications
+const EXTENDED_RECORDING_SECONDS = 120; // 2 minutes for complete RTI dictation
 import { isWorkflowResponse } from "@/lib/workflow/types";
 import { isApplicationApiResponse } from "@/lib/applications/types";
 import type { ApplicationRecord } from "@/lib/applications/types";
@@ -255,7 +259,7 @@ export default function Home() {
       voiceChunks.current = [];
       voiceStream.current = stream;
       voiceRecorder.current = recorder;
-      setVoiceNotice("Speak naturally, then press stop. Recording is limited to 25 seconds.");
+      setVoiceNotice("Speak naturally, then press stop. Recording limit: 2 minutes.");
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) voiceChunks.current.push(event.data);
       };
@@ -308,10 +312,10 @@ export default function Home() {
       recorder.start();
       voiceStopTimer.current = setTimeout(() => {
         if (recorder.state === "recording") {
-          setVoiceNotice("25-second limit reached. Transcribing with Sarvam...");
+          setVoiceNotice("2-minute limit reached. Transcribing with Sarvam...");
           recorder.stop();
         }
-      }, MAX_SPEECH_RECORDING_SECONDS * 1000);
+      }, EXTENDED_RECORDING_SECONDS * 1000);
       setVoiceState("listening");
     } catch {
       setVoiceState("idle");
